@@ -33,7 +33,7 @@ def _query_tokens(query):
     return [t for t in toks if len(t) >= 3]
 
 
-def fetch_kalshi(query, max_pages=16, page_size=200, window_days=1000, enough=60):
+def fetch_kalshi(query, max_pages=12, page_size=200, window_days=1000, enough=50):
     """Keyword-scan Kalshi's /markets, windowed to near-term close dates.
 
     Kalshi's /events feed is ordered close-date-descending, so far-future
@@ -54,13 +54,24 @@ def fetch_kalshi(query, max_pages=16, page_size=200, window_days=1000, enough=60
     }
     out, cursor = {}, None
     with httpx.Client(timeout=25) as client:
-        for _ in range(max_pages):
+        for page in range(max_pages):
             params = dict(base)
             if cursor:
                 params["cursor"] = cursor
-            r = client.get(f"{KALSHI}/markets", params=params)
-            r.raise_for_status()
-            data = r.json()
+            # fetch with backoff on Kalshi's 429 rate limit
+            data = None
+            for attempt in range(5):
+                r = client.get(f"{KALSHI}/markets", params=params)
+                if r.status_code == 429:
+                    ra = r.headers.get("Retry-After")
+                    wait = float(ra) if ra and ra.replace(".", "").isdigit() else 0.8 * (2 ** attempt)
+                    time.sleep(min(wait, 5.0))
+                    continue
+                r.raise_for_status()
+                data = r.json()
+                break
+            if data is None:
+                break  # persistent rate limiting -> return what we have so far
             for m in data.get("markets", []):
                 # skip untraded placeholder markets (misleading default quotes)
                 if float(m.get("volume_fp") or 0) == 0 and float(m.get("open_interest_fp") or 0) == 0:
@@ -74,8 +85,8 @@ def fetch_kalshi(query, max_pages=16, page_size=200, window_days=1000, enough=60
             cursor = data.get("cursor")
             if not cursor or len(out) >= enough:
                 break
+            time.sleep(0.25)  # gentle throttle to stay under the rate limit
     return list(out.values())
-    return out
 
 
 def fetch_polymarket(query, limit=40):
@@ -114,8 +125,17 @@ def scan(query: str, min_gap: float = 0.0, min_similarity: float = 0.33) -> str:
     (polymarket_yes - kalshi_yes). Gaps are CANDIDATES, not guaranteed arbitrage
     - verify identical resolution terms, and account for spread/fees/settlement.
     """
-    kalshi = fetch_kalshi(query)
-    poly = fetch_polymarket(query)
+    warnings = []
+    try:
+        kalshi = fetch_kalshi(query)
+    except Exception as e:
+        kalshi = []
+        warnings.append(f"Kalshi fetch degraded ({type(e).__name__}); showing partial/Polymarket-only.")
+    try:
+        poly = fetch_polymarket(query)
+    except Exception as e:
+        poly = []
+        warnings.append(f"Polymarket fetch degraded ({type(e).__name__}).")
     pairs, konly, ponly = sc.match_markets(kalshi, poly, min_similarity=min_similarity)
     if min_gap > 0:
         pairs = [p for p in pairs if p["abs_gap"] >= min_gap]
@@ -129,6 +149,7 @@ def scan(query: str, min_gap: float = 0.0, min_similarity: float = 0.33) -> str:
         "pairs": pairs,
         "kalshi_only": sorted(konly, key=lambda x: x["volume"], reverse=True)[:25],
         "polymarket_only": sorted(ponly, key=lambda x: x["volume"], reverse=True)[:25],
+        "warnings": warnings,
         "disclaimer": (
             "Gaps are candidates to investigate, not guaranteed arbitrage. "
             "Verify both markets resolve on the same condition and account for "
