@@ -28,24 +28,47 @@ _FILLER = {
 }
 
 
+def _stem(tok):
+    """Very light stemmer so 'cuts'/'cut', 'rates'/'rate', 'declines'/'decline' match."""
+    if len(tok) > 4 and tok.endswith("ies"):
+        return tok[:-3] + "y"
+    if len(tok) > 4 and tok.endswith("es"):
+        return tok[:-2]
+    if len(tok) > 3 and tok.endswith("s") and not tok.endswith("ss"):
+        return tok[:-1]
+    return tok
+
+
 def normalize_title(text):
-    """Lowercase, strip punctuation, drop filler words -> token list + cleaned str."""
+    """Lowercase, strip punctuation, drop filler, light-stem -> token list + cleaned str."""
     text = (text or "").lower()
     text = re.sub(r"[^a-z0-9\s.$%]", " ", text)
-    tokens = [t for t in text.split() if t and t not in _FILLER]
+    tokens = [_stem(t) for t in text.split() if t and t not in _FILLER]
     return tokens, " ".join(tokens)
 
 
+# tokens that carry little discriminating power on their own
+_COMMON = {"rate", "rates", "price", "year", "month", "day", "2024", "2025", "2026", "2027", "2028"}
+
+
 def title_similarity(a, b):
-    """Blend of sequence ratio and token Jaccard on normalized titles (0..1)."""
+    """Blend of sequence ratio and (rarity-weighted) token Jaccard on titles (0..1)."""
     ta, sa = normalize_title(a)
     tb, sb = normalize_title(b)
     if not sa or not sb:
         return 0.0
     seq = SequenceMatcher(None, sa, sb).ratio()
     seta, setb = set(ta), set(tb)
-    jac = len(seta & setb) / len(seta | setb) if (seta | setb) else 0.0
-    return 0.5 * seq + 0.5 * jac
+    union = seta | setb
+    inter = seta & setb
+    jac = len(inter) / len(union) if union else 0.0
+    # bonus: share of DISTINCTIVE tokens that overlap (numbers, names, thresholds)
+    distinct_a = {t for t in seta if t not in _COMMON}
+    distinct_b = {t for t in setb if t not in _COMMON}
+    d_union = distinct_a | distinct_b
+    d_inter = distinct_a & distinct_b
+    d_overlap = len(d_inter) / len(d_union) if d_union else 0.0
+    return 0.30 * seq + 0.40 * jac + 0.30 * d_overlap
 
 
 # --- normalization of each venue's market into a common shape ----------------
@@ -133,7 +156,7 @@ def normalize_polymarket_market(m, event_title=None):
 
 # --- matching ---------------------------------------------------------------
 
-def match_markets(kalshi, polymarket, min_similarity=0.45):
+def match_markets(kalshi, polymarket, min_similarity=0.33):
     """Greedy best-match Kalshi<->Polymarket by title similarity.
 
     Returns (pairs, kalshi_only, polymarket_only). Each pair carries the

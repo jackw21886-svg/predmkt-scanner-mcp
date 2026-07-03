@@ -84,7 +84,7 @@ def fetch_polymarket(query, limit=40):
 
 
 @mcp.tool()
-def scan(query: str, min_gap: float = 0.0, min_similarity: float = 0.45) -> str:
+def scan(query: str, min_gap: float = 0.0, min_similarity: float = 0.33) -> str:
     """Scan Kalshi vs Polymarket for a topic and rank cross-venue Yes-price gaps.
 
     query: topic/keyword, e.g. "bitcoin 150k", "fed rate cut", "government shutdown".
