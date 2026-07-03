@@ -14,6 +14,7 @@ account for spread, fees, and settlement differences before acting. This
 server places no orders and holds no credentials.
 """
 import json
+import time
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -31,33 +32,48 @@ def _query_tokens(query):
     return [t for t in toks if len(t) >= 3]
 
 
-def fetch_kalshi(query, max_pages=8, page_size=200):
-    """Page open Kalshi events and keep markets whose title matches a query token."""
+def fetch_kalshi(query, max_pages=16, page_size=200, window_days=1000, enough=60):
+    """Keyword-scan Kalshi's /markets, windowed to near-term close dates.
+
+    Kalshi's /events feed is ordered close-date-descending, so far-future
+    novelty markets (2050-2099) fill the first pages and near-term markets
+    (World Cup, elections, Fed, EOY crypto) are never reached within a sane
+    page budget. /markets honours min_close_ts / max_close_ts, so we window
+    to [now, now+window_days] to drop the novelty noise and surface the
+    markets people actually compare across venues. We keep only markets with
+    some activity (volume or open interest), filter by query token, dedupe by
+    ticker, and early-stop once we have enough matches."""
     qtokens = _query_tokens(query)
-    out, cursor = [], None
+    now = int(time.time())
+    base = {
+        "status": "open",
+        "limit": page_size,
+        "min_close_ts": now,
+        "max_close_ts": now + window_days * 86400,
+    }
+    out, cursor = {}, None
     with httpx.Client(timeout=25) as client:
         for _ in range(max_pages):
-            params = {"status": "open", "with_nested_markets": "true", "limit": page_size}
+            params = dict(base)
             if cursor:
                 params["cursor"] = cursor
-            r = client.get(f"{KALSHI}/events", params=params)
+            r = client.get(f"{KALSHI}/markets", params=params)
             r.raise_for_status()
             data = r.json()
-            for ev in data.get("events", []):
-                ev_title = ev.get("title", "")
-                cat = ev.get("category")
-                for m in ev.get("markets", []):
-                    hay, _ = sc.normalize_title(
-                        f"{ev_title} {m.get('title','')} {m.get('yes_sub_title','')}"
-                    )
-                    if qtokens and not any(t in hay for t in qtokens):
-                        continue
-                    nm = sc.normalize_kalshi_market(m, ev_title, cat)
-                    if nm:
-                        out.append(nm)
+            for m in data.get("markets", []):
+                # skip untraded placeholder markets (misleading default quotes)
+                if float(m.get("volume_fp") or 0) == 0 and float(m.get("open_interest_fp") or 0) == 0:
+                    continue
+                hay, _ = sc.normalize_title(f"{m.get('title','')} {m.get('yes_sub_title','')}")
+                if qtokens and not any(t in hay for t in qtokens):
+                    continue
+                nm = sc.normalize_kalshi_market(m)
+                if nm:
+                    out[nm["ticker"]] = nm
             cursor = data.get("cursor")
-            if not cursor:
+            if not cursor or len(out) >= enough:
                 break
+    return list(out.values())
     return out
 
 
