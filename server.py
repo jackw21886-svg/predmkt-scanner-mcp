@@ -25,6 +25,7 @@ mcp = FastMCP("predmkt-scanner")
 
 KALSHI = "https://api.elections.kalshi.com/trade-api/v2"
 GAMMA = "https://gamma-api.polymarket.com"
+CLOB = "https://clob.polymarket.com"
 
 
 def _query_tokens(query):
@@ -136,6 +137,59 @@ def scan(query: str, min_gap: float = 0.0, min_similarity: float = 0.33) -> str:
         ),
     }
     return json.dumps(result)
+
+
+def fetch_kalshi_history(series, ticker, days=30):
+    end = int(time.time())
+    start = end - days * 86400
+    r = httpx.get(
+        f"{KALSHI}/series/{series}/markets/{ticker}/candlesticks",
+        params={"period_interval": 1440, "start_ts": start, "end_ts": end},
+        timeout=25,
+    )
+    r.raise_for_status()
+    out = []
+    for c in r.json().get("candlesticks", []):
+        pr = c.get("price", {}) or {}
+        p = pr.get("close_dollars") or pr.get("mean_dollars") or pr.get("previous_dollars")
+        if p is not None:
+            out.append({"t": c.get("end_period_ts"), "p": round(float(p), 4)})
+    return out
+
+
+def fetch_polymarket_history(token, days=30):
+    interval = "1m" if days <= 31 else "max"
+    r = httpx.get(
+        f"{CLOB}/prices-history",
+        params={"market": token, "interval": interval, "fidelity": 720},
+        timeout=25,
+    )
+    r.raise_for_status()
+    return [{"t": pt["t"], "p": round(float(pt["p"]), 4)} for pt in r.json().get("history", [])]
+
+
+@mcp.tool()
+def pair_history(kalshi_ticker: str = "", polymarket_token: str = "",
+                 kalshi_series: str = "", days: int = 30) -> str:
+    """Aligned Yes-price history for one Kalshi market and one Polymarket token.
+
+    Use the `ticker`/`series` from a Kalshi market and the `clob_token` from a
+    Polymarket market (both returned by `scan`) to chart how each venue's Yes
+    price moved over the last `days` days. Returns JSON {kalshi:[{t,p}],
+    polymarket:[{t,p}]} with p in 0-1 dollars and t as unix seconds."""
+    series = kalshi_series or (kalshi_ticker.split("-")[0] if kalshi_ticker else "")
+    k, p = [], []
+    if kalshi_ticker and series:
+        try:
+            k = fetch_kalshi_history(series, kalshi_ticker, days)
+        except Exception:
+            k = []
+    if polymarket_token:
+        try:
+            p = fetch_polymarket_history(polymarket_token, days)
+        except Exception:
+            p = []
+    return json.dumps({"kalshi": k, "polymarket": p})
 
 
 @mcp.tool()

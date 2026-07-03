@@ -98,6 +98,7 @@ def normalize_kalshi_market(m, event_title=None, category=None):
     title = m.get("title") or event_title or ""
     sub = m.get("yes_sub_title") or ""
     display = title if not sub or sub.lower() in title.lower() else f"{title} - {sub}"
+    ticker = m.get("ticker") or ""
     return {
         "venue": "kalshi",
         "title": display,
@@ -108,8 +109,9 @@ def normalize_kalshi_market(m, event_title=None, category=None):
         "volume": float(m.get("volume_fp") or 0),
         "close_time": m.get("close_time"),
         "category": category,
-        "ticker": m.get("ticker"),
-        "url": f"https://kalshi.com/markets/{m.get('ticker','')}",
+        "ticker": ticker,
+        "series": ticker.split("-")[0] if ticker else "",
+        "url": f"https://kalshi.com/markets/{ticker}",
     }
 
 
@@ -138,6 +140,21 @@ def normalize_polymarket_market(m, event_title=None):
         return None
     if outcomes and isinstance(outcomes, list) and len(outcomes) not in (0, 2):
         return None
+    # clob token id for the "Yes" outcome (used for price-history charts)
+    clob_token = ""
+    try:
+        toks = m.get("clobTokenIds")
+        if isinstance(toks, str):
+            toks = json.loads(toks)
+        if toks and outcomes and isinstance(outcomes, list) and len(toks) == len(outcomes):
+            for name, tk in zip(outcomes, toks):
+                if str(name).strip().lower() == "yes":
+                    clob_token = tk
+                    break
+        elif toks:
+            clob_token = toks[0]
+    except (ValueError, TypeError):
+        pass
     title = m.get("question") or event_title or ""
     return {
         "venue": "polymarket",
@@ -150,6 +167,7 @@ def normalize_polymarket_market(m, event_title=None):
         "close_time": m.get("endDateIso") or m.get("endDate"),
         "category": None,
         "ticker": m.get("slug"),
+        "clob_token": clob_token,
         "url": f"https://polymarket.com/event/{m.get('slug','')}",
     }
 
